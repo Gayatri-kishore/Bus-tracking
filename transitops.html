@@ -1,0 +1,760 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover, user-scalable=no">
+    <title>TransitOps — Fleet Control Center</title>
+
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <!-- Leaflet OpenStreetMap CSS & JS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+    <!-- FontAwesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+    <!-- Typography: Inter for UI, JetBrains Mono for telemetry readouts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+    <style>
+        :root {
+            --bg-deep: #080B14;
+            --panel: #0E1524;
+            --panel-alt: #121B2E;
+            --panel-hover: #172236;
+            --border: #1E2A42;
+            --border-light: #2A3A57;
+            --accent-cyan: #2DD4E8;
+            --accent-cyan-dim: #1B7C89;
+            --accent-amber: #F5A623;
+            --accent-emerald: #2FD48B;
+            --accent-red: #F0525C;
+            --text-primary: #EAF0FA;
+            --text-secondary: #8A97B3;
+            --text-muted: #4E5A75;
+        }
+
+        * { -webkit-tap-highlight-color: transparent; }
+
+        html, body {
+            background: var(--bg-deep);
+            font-family: 'Inter', ui-sans-serif, system-ui, sans-serif;
+            overscroll-behavior: none;
+        }
+
+        .font-mono { font-family: 'JetBrains Mono', ui-monospace, monospace; }
+
+        /* Faint schematic grid, evokes a route-planning / dispatch board backdrop */
+        .grid-backdrop {
+            background-image:
+                radial-gradient(circle at 1px 1px, rgba(45, 212, 232, 0.08) 1px, transparent 0);
+            background-size: 22px 22px;
+        }
+
+        #map { height: 100%; width: 100%; z-index: 1; background: var(--bg-deep); }
+
+        .leaflet-control-zoom a {
+            background-color: var(--panel) !important;
+            color: var(--text-primary) !important;
+            border-color: var(--border) !important;
+        }
+        .leaflet-control-zoom a:hover { background-color: var(--panel-hover) !important; }
+        .leaflet-control-attribution {
+            background: rgba(8, 11, 20, 0.75) !important;
+            color: var(--text-muted) !important;
+            font-size: 9px !important;
+        }
+        .leaflet-control-attribution a { color: var(--text-secondary) !important; }
+
+        /* Bus marker: amber instrument dot with a live radar pulse ring */
+        .bus-marker-wrap {
+            width: 30px; height: 30px;
+            display: flex; align-items: center; justify-content: center;
+            position: relative;
+        }
+        .bus-pulse-ring {
+            position: absolute; inset: 0;
+            border-radius: 50%;
+            background: var(--accent-amber);
+            opacity: 0.55;
+            animation: pulse-ring 2.2s cubic-bezier(0.2, 0.7, 0.4, 1) infinite;
+        }
+        .bus-marker-wrap.is-selected .bus-pulse-ring { background: var(--accent-cyan); }
+        @keyframes pulse-ring {
+            0% { transform: scale(0.6); opacity: 0.5; }
+            75% { transform: scale(2.1); opacity: 0; }
+            100% { transform: scale(2.1); opacity: 0; }
+        }
+        .custom-bus-icon {
+            position: relative;
+            background-color: var(--accent-amber);
+            border: 2px solid #0B0F1A;
+            border-radius: 50%;
+            color: #0B0F1A;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 12px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.55);
+            width: 26px !important;
+            height: 26px !important;
+        }
+        .bus-marker-wrap.is-selected .custom-bus-icon {
+            background-color: var(--accent-cyan);
+        }
+        .bus-arrow { transition: transform 0.12s linear; display: block; }
+
+        @media (prefers-reduced-motion: reduce) {
+            .bus-pulse-ring { animation: none; opacity: 0.25; }
+        }
+
+        /* HUD-style corner brackets on the telemetry card */
+        .hud-corners { position: relative; }
+        .hud-corners::before, .hud-corners::after,
+        .hud-corners .c2, .hud-corners .c3 {
+            content: ""; position: absolute; width: 10px; height: 10px;
+            border-color: var(--accent-cyan); opacity: 0.75;
+        }
+        .hud-corners::before { top: -1px; left: -1px; border-top: 2px solid; border-left: 2px solid; }
+        .hud-corners::after { bottom: -1px; right: -1px; border-bottom: 2px solid; border-right: 2px solid; }
+
+        .status-dot { box-shadow: 0 0 0 3px rgba(47, 212, 139, 0.18); }
+        .status-dot-live {
+            animation: blink-dot 1.6s ease-in-out infinite;
+        }
+        @keyframes blink-dot { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+
+        /* Scrollbars */
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: var(--border-light); border-radius: 4px; }
+
+        /* Bottom sheet on mobile */
+        @media (max-width: 767px) {
+            .mobile-drawer {
+                position: absolute;
+                bottom: 0; left: 0; right: 0;
+                max-height: 68vh;
+                border-radius: 1.1rem 1.1rem 0 0;
+                box-shadow: 0 -12px 30px -8px rgba(0,0,0,0.6);
+                transform: translateY(0);
+                transition: transform 0.28s cubic-bezier(0.32, 0.72, 0, 1);
+                padding-bottom: env(safe-area-inset-bottom);
+            }
+            .mobile-drawer.drawer-closed { transform: translateY(100%); }
+        }
+
+        input:focus-visible, button:focus-visible, select:focus-visible {
+            outline: 2px solid var(--accent-cyan);
+            outline-offset: 1px;
+        }
+
+        .capacity-bar-track { background: var(--border); }
+
+        .fade-in { animation: fadeIn 0.25s ease-out; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+    </style>
+</head>
+<body class="flex flex-col h-screen overflow-hidden" style="background: var(--bg-deep); color: var(--text-primary);">
+
+    <!-- Header -->
+    <header class="h-14 md:h-16 px-3 md:px-6 flex items-center justify-between shrink-0 z-30 border-b" style="background: var(--panel); border-color: var(--border);">
+        <div class="flex items-center space-x-2 md:space-x-3 min-w-0">
+            <div class="p-1.5 md:p-2 rounded-lg shrink-0" style="background: var(--accent-amber); color: #0B0F1A;">
+                <i class="fa-solid fa-bus-simple text-sm md:text-lg"></i>
+            </div>
+            <div class="min-w-0">
+                <div class="flex items-center gap-1.5">
+                    <h1 class="text-sm md:text-base font-bold tracking-tight truncate">TransitOps</h1>
+                    <span class="hidden sm:flex items-center gap-1 text-[9px] md:text-[10px] font-mono font-semibold px-1.5 py-0.5 rounded" style="background: rgba(47,212,139,0.12); color: var(--accent-emerald);">
+                        <span class="w-1.5 h-1.5 rounded-full status-dot-live" style="background: var(--accent-emerald);"></span>
+                        LIVE
+                    </span>
+                </div>
+                <p class="text-[10px] md:text-xs truncate" style="color: var(--text-secondary);">Fleet telemetry &middot; road-snapped routing</p>
+            </div>
+        </div>
+
+        <div class="flex items-center space-x-2 md:space-x-4 shrink-0">
+            <div class="flex p-1 rounded-lg border text-[11px] md:text-xs" style="background: var(--panel-alt); border-color: var(--border);">
+                <button onclick="switchView('tracking')" id="tab-tracking" class="px-2.5 md:px-3.5 py-1 md:py-1.5 rounded-md font-semibold transition">Tracking</button>
+                <button onclick="switchView('management')" id="tab-management" class="px-2.5 md:px-3.5 py-1 md:py-1.5 rounded-md font-semibold transition">Routes</button>
+            </div>
+
+            <button onclick="triggerSOS()" class="text-white px-2.5 md:px-3.5 py-1 md:py-1.5 rounded-lg text-xs font-semibold transition flex items-center space-x-1.5" style="background: var(--accent-red);" onmouseover="this.style.opacity=0.88" onmouseout="this.style.opacity=1">
+                <i class="fa-solid fa-triangle-exclamation text-xs"></i>
+                <span class="hidden md:inline">Emergency Broadcast</span>
+            </button>
+
+            <button onclick="toggleMobileDrawer()" aria-label="Toggle panel" class="md:hidden p-1.5 rounded-lg border text-sm" style="background: var(--panel-alt); border-color: var(--border); color: var(--text-primary);">
+                <i class="fa-solid fa-bars" id="drawer-toggle-icon"></i>
+            </button>
+        </div>
+    </header>
+
+    <!-- Main Workspace -->
+    <div class="flex flex-col md:flex-row flex-1 relative overflow-hidden min-h-0">
+
+        <!-- Tracking Drawer -->
+        <aside id="drawer-tracking" class="mobile-drawer w-full md:w-80 border-r flex flex-col z-20 md:z-10 min-h-0" style="background: var(--panel); border-color: var(--border);">
+            <div class="w-12 h-1 rounded-full mx-auto my-2 md:hidden" style="background: var(--border-light);"></div>
+
+            <div class="p-3 border-b" style="border-color: var(--border);">
+                <div class="relative">
+                    <i class="fa-solid fa-magnifying-glass absolute left-3 top-1/2 -translate-y-1/2 text-xs" style="color: var(--text-muted);"></i>
+                    <input type="text" id="search-bus" oninput="renderBusList()" placeholder="Search vehicle or route…"
+                        class="w-full rounded-md pl-8 pr-3 py-2 text-xs focus:outline-none transition"
+                        style="background: var(--panel-alt); border: 1px solid var(--border); color: var(--text-primary);">
+                </div>
+                <div class="flex justify-between items-center mt-2 text-[10px] font-mono" style="color: var(--text-muted);">
+                    <span id="fleet-count">2 vehicles active</span>
+                    <button onclick="fitAllBuses()" aria-label="Fit all vehicles in view" class="hover:underline" style="color: var(--accent-cyan);"><i class="fa-solid fa-expand mr-1"></i>Fit all</button>
+                </div>
+            </div>
+
+            <div class="flex-1 overflow-y-auto p-3 space-y-2.5" id="bus-list"></div>
+
+            <div class="p-3 border-t text-xs flex justify-between items-center gap-2" style="border-color: var(--border); background: var(--panel-alt);">
+                <span style="color: var(--text-secondary);">Sim speed</span>
+                <select onchange="setSimSpeed(this.value)" class="rounded px-2 py-1.5 text-xs font-mono" style="background: var(--bg-deep); border: 1px solid var(--border); color: var(--text-primary);">
+                    <option value="0.5">0.5&times; slow</option>
+                    <option value="1.0" selected>1.0&times; realtime</option>
+                    <option value="2.0">2.0&times; fast</option>
+                    <option value="4.0">4.0&times; very fast</option>
+                </select>
+            </div>
+        </aside>
+
+        <!-- Management Drawer -->
+        <aside id="drawer-management" class="mobile-drawer drawer-closed w-full md:w-96 border-r hidden flex-col z-20 md:z-10 min-h-0" style="background: var(--panel); border-color: var(--border);">
+            <div class="w-12 h-1 rounded-full mx-auto my-2 md:hidden" style="background: var(--border-light);"></div>
+
+            <div class="p-4 border-b" style="border-color: var(--border);">
+                <h2 class="text-sm font-bold flex items-center gap-2">
+                    <i class="fa-solid fa-route" style="color: var(--accent-cyan);"></i> Add campus route
+                </h2>
+                <p class="text-xs mt-0.5" style="color: var(--text-secondary);">Routes auto-snap to real roads via OSRM.</p>
+            </div>
+
+            <form id="route-form" onsubmit="handleCreateRoute(event)" class="p-4 space-y-3.5 flex-1 overflow-y-auto">
+                <div>
+                    <label class="block text-xs font-medium mb-1" style="color: var(--text-secondary);">Route name</label>
+                    <input type="text" id="new-route-name" placeholder="e.g. South Campus Shuttle" required class="field-input">
+                </div>
+
+                <div>
+                    <label class="block text-xs font-medium mb-1" style="color: var(--text-secondary);">Vehicle ID</label>
+                    <input type="text" id="new-bus-id" placeholder="e.g. BUS-104" required class="field-input">
+                </div>
+
+                <div class="grid grid-cols-2 gap-3">
+                    <div>
+                        <label class="block text-xs font-medium mb-1" style="color: var(--text-secondary);">Start lat, lng</label>
+                        <input type="text" id="new-start-coords" placeholder="17.7280, 83.3100" required class="field-input font-mono">
+                    </div>
+                    <div>
+                        <label class="block text-xs font-medium mb-1" style="color: var(--text-secondary);">End lat, lng</label>
+                        <input type="text" id="new-end-coords" placeholder="17.7370, 83.3240" required class="field-input font-mono">
+                    </div>
+                </div>
+
+                <div>
+                    <label class="block text-xs font-medium mb-1" style="color: var(--text-secondary);">Target speed (km/h)</label>
+                    <input type="number" id="new-speed" value="30" min="10" max="60" required class="field-input">
+                </div>
+
+                <div id="form-error" class="hidden text-xs rounded-md px-3 py-2 font-medium" style="background: rgba(240,82,92,0.12); color: var(--accent-red); border: 1px solid rgba(240,82,92,0.3);"></div>
+
+                <button type="submit" id="submit-btn" class="w-full font-semibold py-2.5 rounded-md text-xs transition flex items-center justify-center gap-2" style="background: var(--accent-cyan); color: #06222A;">
+                    <span id="submit-btn-label">Publish route &amp; deploy bus</span>
+                </button>
+            </form>
+        </aside>
+
+        <!-- Map -->
+        <main class="flex-1 relative h-full min-h-0 grid-backdrop">
+            <div id="map"></div>
+
+            <!-- Initial load overlay -->
+            <div id="load-overlay" class="absolute inset-0 z-[1200] flex flex-col items-center justify-center gap-3" style="background: var(--bg-deep);">
+                <div class="w-10 h-10 rounded-full border-2 animate-spin" style="border-color: var(--border); border-top-color: var(--accent-cyan);"></div>
+                <p class="text-xs font-mono" style="color: var(--text-secondary);">Initializing fleet telemetry…</p>
+            </div>
+
+            <!-- Recenter control (desktop-friendly, sits above zoom) -->
+            <div class="hidden md:flex absolute bottom-6 left-6 z-[900] flex-col gap-2">
+                <button onclick="centerOnSelected()" title="Center on selected vehicle" class="w-9 h-9 rounded-lg border flex items-center justify-center transition" style="background: var(--panel); border-color: var(--border); color: var(--text-primary);" onmouseover="this.style.background='var(--panel-hover)'" onmouseout="this.style.background='var(--panel)'">
+                    <i class="fa-solid fa-crosshairs text-xs"></i>
+                </button>
+            </div>
+
+            <!-- Telemetry Card -->
+            <div id="telemetry-toast" class="hud-corners absolute top-3 right-3 md:top-auto md:bottom-6 md:right-6 backdrop-blur p-3 md:p-4 rounded-lg shadow-2xl z-[1000] w-60 md:w-72 fade-in" style="background: rgba(14,21,36,0.92); border: 1px solid var(--border);">
+                <div class="flex justify-between items-start mb-2">
+                    <div class="min-w-0">
+                        <h3 class="font-bold text-xs md:text-sm font-mono truncate" id="toast-bus-id">BUS-101</h3>
+                        <p class="text-[10px] md:text-xs truncate" style="color: var(--text-secondary);" id="toast-route">North Campus Express</p>
+                    </div>
+                    <span class="shrink-0 ml-2 px-1.5 py-0.5 text-[9px] md:text-[10px] rounded font-semibold font-mono" style="background: rgba(47,212,139,0.14); color: var(--accent-emerald);">SNAPPED</span>
+                </div>
+                <div class="grid grid-cols-2 gap-x-2 gap-y-1.5 text-[11px] md:text-xs py-2 border-y my-1" style="border-color: var(--border); color: var(--text-secondary);">
+                    <div>Speed <span id="toast-speed" class="block font-mono font-semibold text-sm" style="color: var(--text-primary);">28 km/h</span></div>
+                    <div>ETA <span id="toast-eta" class="block font-mono font-semibold text-sm" style="color: var(--text-primary);">3 min</span></div>
+                    <div class="col-span-2">Next stop <span id="toast-stop" class="block font-mono font-semibold text-sm truncate" style="color: var(--text-primary);">Tech Park Gate</span></div>
+                </div>
+                <div>
+                    <div class="flex justify-between text-[10px] mb-1" style="color: var(--text-secondary);">
+                        <span>Capacity</span>
+                        <span id="toast-capacity" class="font-mono font-semibold" style="color: var(--text-primary);">84%</span>
+                    </div>
+                    <div class="h-1.5 rounded-full capacity-bar-track overflow-hidden">
+                        <div id="toast-capacity-bar" class="h-full rounded-full transition-all" style="width: 84%; background: var(--accent-amber);"></div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Emergency Broadcast Modal (replaces native alert for a consistent HUD feel) -->
+    <div id="sos-modal" class="fixed inset-0 z-[2000] hidden items-center justify-center p-4" style="background: rgba(4,6,12,0.7);">
+        <div class="hud-corners w-full max-w-sm rounded-lg p-5 fade-in" style="background: var(--panel); border: 1px solid var(--border);">
+            <div class="flex items-center gap-2.5 mb-2">
+                <div class="w-9 h-9 rounded-full flex items-center justify-center shrink-0" style="background: rgba(240,82,92,0.14);">
+                    <i class="fa-solid fa-tower-broadcast text-sm" style="color: var(--accent-red);"></i>
+                </div>
+                <h3 class="font-bold text-sm">Emergency broadcast sent</h3>
+            </div>
+            <p class="text-xs leading-relaxed mb-4" style="color: var(--text-secondary);">All drivers and dispatch staff have been notified across every active route. Fleet status is being monitored in real time.</p>
+            <button onclick="closeSOS()" class="w-full font-semibold py-2 rounded-md text-xs" style="background: var(--accent-red); color: white;">Acknowledge</button>
+        </div>
+    </div>
+
+    <!-- Lightweight toast for non-blocking notices (e.g. routing fallback) -->
+    <div id="notice-toast" class="fixed bottom-4 left-1/2 -translate-x-1/2 z-[2000] hidden px-4 py-2.5 rounded-lg text-xs font-medium shadow-2xl fade-in" style="background: var(--panel-alt); border: 1px solid var(--border); color: var(--text-primary);"></div>
+
+    <style>
+        .field-input {
+            width: 100%;
+            border-radius: 0.375rem;
+            padding: 0.5rem 0.75rem;
+            font-size: 0.75rem;
+            background: var(--panel-alt);
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+            outline: none;
+            transition: border-color 0.15s;
+        }
+        .field-input:focus { border-color: var(--accent-cyan); background: var(--bg-deep); }
+        .field-input::placeholder { color: var(--text-muted); }
+
+        #tab-tracking.active, #tab-management.active {
+            background: var(--accent-cyan); color: #06222A;
+        }
+        #tab-tracking:not(.active), #tab-management:not(.active) {
+            color: var(--text-secondary);
+        }
+        #tab-tracking:not(.active):hover, #tab-management:not(.active):hover { color: var(--text-primary); }
+    </style>
+
+    <script>
+        let buses = [
+            {
+                id: "BUS-101",
+                route: "North Campus Express",
+                targetSpeedKmh: 28,
+                eta: "3 min",
+                occupancy: "84%",
+                capacityNum: 84,
+                nextStop: "Tech Park Gate",
+                stops: [[17.7280, 83.3100], [17.7305, 83.3150], [17.7370, 83.3240], [17.7280, 83.3100]],
+                waypoints: [],
+                currentSegment: 0,
+                segmentProgress: 0,
+                currentPos: [17.7280, 83.3100],
+                bearing: 0
+            },
+            {
+                id: "BUS-108",
+                route: "Hostel Shuttle",
+                targetSpeedKmh: 22,
+                eta: "2 min",
+                occupancy: "36%",
+                capacityNum: 36,
+                nextStop: "Central Library",
+                stops: [[17.7220, 83.3050], [17.7275, 83.3120], [17.7320, 83.3170], [17.7220, 83.3050]],
+                waypoints: [],
+                currentSegment: 0,
+                segmentProgress: 0,
+                currentPos: [17.7220, 83.3050],
+                bearing: 0
+            }
+        ];
+
+        let speedMultiplier = 1.0;
+        let selectedBus = buses[0];
+        const markers = {};
+        const polylines = {};
+        let lastTimestamp = null;
+        let isMobileDrawerOpen = true;
+        let currentView = 'tracking';
+
+        const map = L.map('map', { zoomControl: false }).setView([17.730, 83.315], 14);
+
+        L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+            maxZoom: 19,
+            subdomains: 'abcd',
+            attribution: '&copy; OpenStreetMap contributors &copy; CARTO'
+        }).addTo(map);
+
+        L.control.zoom({ position: 'bottomright' }).addTo(map);
+
+        function showNotice(msg, ms = 3200) {
+            const el = document.getElementById('notice-toast');
+            el.textContent = msg;
+            el.classList.remove('hidden');
+            clearTimeout(showNotice._t);
+            showNotice._t = setTimeout(() => el.classList.add('hidden'), ms);
+        }
+
+        async function snapToRoads(bus) {
+            const coordString = bus.stops.map(s => `${s[1]},${s[0]}`).join(';');
+            const url = `https://router.project-osrm.org/route/v1/driving/${coordString}?overview=full&geometries=geojson`;
+
+            try {
+                const res = await fetch(url);
+                if (!res.ok) throw new Error('routing service error');
+                const data = await res.json();
+                if (data.routes && data.routes[0]) {
+                    bus.waypoints = data.routes[0].geometry.coordinates.map(c => [c[1], c[0]]);
+                } else {
+                    throw new Error('no route found');
+                }
+            } catch (err) {
+                bus.waypoints = bus.stops.length > 1 ? bus.stops : [bus.currentPos, bus.currentPos];
+                showNotice(`${bus.id}: road snapping unavailable, using direct path`);
+            }
+
+            if (polylines[bus.id]) map.removeLayer(polylines[bus.id]);
+            polylines[bus.id] = L.polyline(bus.waypoints, { color: '#2DD4E8', weight: 3.5, opacity: 0.45 }).addTo(map);
+        }
+
+        function getDistanceMeters(p1, p2) {
+            const R = 6371000;
+            const dLat = (p2[0] - p1[0]) * Math.PI / 180;
+            const dLng = (p2[1] - p1[1]) * Math.PI / 180;
+            const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                      Math.cos(p1[0] * Math.PI / 180) * Math.cos(p2[0] * Math.PI / 180) *
+                      Math.sin(dLng/2) * Math.sin(dLng/2);
+            return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+        }
+
+        function getBearing(p1, p2) {
+            const lat1 = p1[0] * Math.PI / 180;
+            const lat2 = p2[0] * Math.PI / 180;
+            const dLng = (p2[1] - p1[1]) * Math.PI / 180;
+            const y = Math.sin(dLng) * Math.cos(lat2);
+            const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLng);
+            return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+        }
+
+        function createBusMarker(bus) {
+            const icon = L.divIcon({
+                className: '',
+                html: `<div class="bus-marker-wrap" id="wrap-${bus.id}">
+                         <div class="bus-pulse-ring"></div>
+                         <div class="custom-bus-icon"><i class="fa-solid fa-location-arrow bus-arrow" id="arrow-${bus.id}"></i></div>
+                       </div>`,
+                iconSize: [30, 30],
+                iconAnchor: [15, 15]
+            });
+            const initialPos = bus.waypoints.length > 0 ? bus.waypoints[0] : bus.currentPos;
+            const marker = L.marker(initialPos, { icon }).addTo(map);
+            marker.on('click', () => selectBus(bus));
+            markers[bus.id] = marker;
+        }
+
+        async function initApp() {
+            for (let bus of buses) {
+                await snapToRoads(bus);
+                createBusMarker(bus);
+            }
+            renderBusList();
+            updateToast();
+            highlightSelectedMarker();
+            requestAnimationFrame(animationLoop);
+
+            const overlay = document.getElementById('load-overlay');
+            overlay.style.transition = 'opacity 0.3s ease';
+            overlay.style.opacity = '0';
+            setTimeout(() => overlay.remove(), 320);
+        }
+
+        function animationLoop(timestamp) {
+            if (!lastTimestamp) lastTimestamp = timestamp;
+            const deltaTime = Math.min((timestamp - lastTimestamp) / 1000, 0.25);
+            lastTimestamp = timestamp;
+
+            buses.forEach(bus => {
+                if (!bus.waypoints || bus.waypoints.length < 2) return;
+
+                let guard = 0;
+                let p1 = bus.waypoints[bus.currentSegment];
+                let p2 = bus.waypoints[(bus.currentSegment + 1) % bus.waypoints.length];
+                let segmentDistance = getDistanceMeters(p1, p2);
+
+                // Skip zero-length segments so the bus never stalls
+                while (segmentDistance === 0 && guard < bus.waypoints.length) {
+                    bus.currentSegment = (bus.currentSegment + 1) % (bus.waypoints.length - 1);
+                    p1 = bus.waypoints[bus.currentSegment];
+                    p2 = bus.waypoints[(bus.currentSegment + 1) % bus.waypoints.length];
+                    segmentDistance = getDistanceMeters(p1, p2);
+                    guard++;
+                }
+                if (segmentDistance === 0) return;
+
+                const currentSpeedMps = (bus.targetSpeedKmh * 1000 / 3600) * speedMultiplier;
+                bus.segmentProgress += (currentSpeedMps * deltaTime) / segmentDistance;
+
+                if (bus.segmentProgress >= 1) {
+                    bus.segmentProgress = 0;
+                    bus.currentSegment = (bus.currentSegment + 1) % (bus.waypoints.length - 1);
+                }
+
+                const nextP1 = bus.waypoints[bus.currentSegment];
+                const nextP2 = bus.waypoints[bus.currentSegment + 1];
+                const lat = nextP1[0] + (nextP2[0] - nextP1[0]) * bus.segmentProgress;
+                const lng = nextP1[1] + (nextP2[1] - nextP1[1]) * bus.segmentProgress;
+
+                bus.currentPos = [lat, lng];
+                bus.bearing = getBearing(nextP1, nextP2);
+
+                if (markers[bus.id]) markers[bus.id].setLatLng(bus.currentPos);
+                const arrowEl = document.getElementById(`arrow-${bus.id}`);
+                if (arrowEl) arrowEl.style.transform = `rotate(${bus.bearing - 45}deg)`;
+
+                if (bus.id === selectedBus.id) updateToast();
+            });
+
+            requestAnimationFrame(animationLoop);
+        }
+
+        function renderBusList() {
+            const listEl = document.getElementById('bus-list');
+            const query = (document.getElementById('search-bus').value || '').trim().toLowerCase();
+            listEl.innerHTML = '';
+
+            const visible = buses.filter(b =>
+                !query || b.id.toLowerCase().includes(query) || b.route.toLowerCase().includes(query)
+            );
+
+            document.getElementById('fleet-count').textContent =
+                `${visible.length} of ${buses.length} vehicle${buses.length !== 1 ? 's' : ''}`;
+
+            if (visible.length === 0) {
+                listEl.innerHTML = `<p class="text-xs text-center py-6" style="color: var(--text-muted);">No vehicles match "${query}"</p>`;
+                return;
+            }
+
+            visible.forEach(bus => {
+                const isSelected = bus.id === selectedBus.id;
+                const capColor = bus.capacityNum > 85 ? 'var(--accent-red)' : bus.capacityNum > 65 ? 'var(--accent-amber)' : 'var(--accent-emerald)';
+                const capBg = bus.capacityNum > 85 ? 'rgba(240,82,92,0.16)' : bus.capacityNum > 65 ? 'rgba(245,166,35,0.16)' : 'rgba(47,212,139,0.16)';
+                const card = document.createElement('div');
+                card.className = 'p-2.5 md:p-3 rounded-lg border cursor-pointer transition';
+                card.style.background = isSelected ? 'var(--panel-hover)' : 'var(--panel-alt)';
+                card.style.borderColor = isSelected ? 'var(--accent-cyan)' : 'var(--border)';
+                card.onclick = () => selectBus(bus);
+
+                card.innerHTML = `
+                    <div class="flex justify-between items-center mb-1">
+                        <span class="font-bold text-xs font-mono" style="color: ${isSelected ? 'var(--accent-cyan)' : 'var(--text-primary)'}">${bus.id}</span>
+                        <span class="text-[10px] px-1.5 py-0.5 rounded font-mono font-semibold" style="background: ${capBg}; color: ${capColor};">
+                            ${bus.occupancy}
+                        </span>
+                    </div>
+                    <p class="text-xs mb-1.5 truncate" style="color: var(--text-secondary);">${bus.route}</p>
+                    <div class="flex justify-between items-center text-[11px] pt-1.5 border-t" style="border-color: var(--border); color: var(--text-muted);">
+                        <span class="truncate"><i class="fa-solid fa-location-dot mr-1" style="color: var(--accent-amber);"></i>${bus.nextStop}</span>
+                        <span class="font-mono shrink-0 ml-2" style="color: var(--text-secondary);">${bus.eta}</span>
+                    </div>
+                `;
+                listEl.appendChild(card);
+            });
+        }
+
+        function highlightSelectedMarker() {
+            buses.forEach(b => {
+                const wrap = document.getElementById(`wrap-${b.id}`);
+                if (wrap) wrap.classList.toggle('is-selected', b.id === selectedBus.id);
+            });
+        }
+
+        function selectBus(bus) {
+            selectedBus = bus;
+            renderBusList();
+            updateToast();
+            highlightSelectedMarker();
+            map.panTo(bus.currentPos);
+        }
+
+        function centerOnSelected() {
+            map.setView(selectedBus.currentPos, 16, { animate: true });
+        }
+
+        function fitAllBuses() {
+            const pts = buses.map(b => b.currentPos);
+            if (pts.length) map.fitBounds(pts, { padding: [60, 60] });
+        }
+
+        function updateToast() {
+            document.getElementById('toast-bus-id').innerText = selectedBus.id;
+            document.getElementById('toast-route').innerText = selectedBus.route;
+            document.getElementById('toast-speed').innerText = `${Math.round(selectedBus.targetSpeedKmh * speedMultiplier)} km/h`;
+            document.getElementById('toast-eta').innerText = selectedBus.eta;
+            document.getElementById('toast-stop').innerText = selectedBus.nextStop;
+            document.getElementById('toast-capacity').innerText = selectedBus.occupancy;
+            const bar = document.getElementById('toast-capacity-bar');
+            bar.style.width = `${selectedBus.capacityNum}%`;
+            bar.style.background = selectedBus.capacityNum > 85 ? 'var(--accent-red)' : selectedBus.capacityNum > 65 ? 'var(--accent-amber)' : 'var(--accent-emerald)';
+        }
+
+        function toggleMobileDrawer() {
+            const activeDrawer = currentView === 'tracking'
+                ? document.getElementById('drawer-tracking')
+                : document.getElementById('drawer-management');
+            const icon = document.getElementById('drawer-toggle-icon');
+
+            isMobileDrawerOpen = !isMobileDrawerOpen;
+            activeDrawer.classList.toggle('drawer-closed', !isMobileDrawerOpen);
+            icon.className = isMobileDrawerOpen ? 'fa-solid fa-xmark' : 'fa-solid fa-bars';
+        }
+
+        function switchView(view) {
+            currentView = view;
+            const trackingDrawer = document.getElementById('drawer-tracking');
+            const managementDrawer = document.getElementById('drawer-management');
+            const tabTracking = document.getElementById('tab-tracking');
+            const tabManagement = document.getElementById('tab-management');
+
+            isMobileDrawerOpen = true;
+            trackingDrawer.classList.remove('drawer-closed');
+            managementDrawer.classList.remove('drawer-closed');
+            document.getElementById('drawer-toggle-icon').className = 'fa-solid fa-xmark';
+
+            if (view === 'tracking') {
+                trackingDrawer.classList.remove('hidden');
+                trackingDrawer.classList.add('flex');
+                managementDrawer.classList.add('hidden');
+                managementDrawer.classList.remove('flex');
+                tabTracking.classList.add('active');
+                tabManagement.classList.remove('active');
+            } else {
+                managementDrawer.classList.remove('hidden');
+                managementDrawer.classList.add('flex');
+                trackingDrawer.classList.add('hidden');
+                trackingDrawer.classList.remove('flex');
+                tabManagement.classList.add('active');
+                tabTracking.classList.remove('active');
+            }
+        }
+
+        function parseCoords(raw) {
+            const parts = raw.split(',').map(n => parseFloat(n.trim()));
+            if (parts.length !== 2 || parts.some(n => Number.isNaN(n))) return null;
+            const [lat, lng] = parts;
+            if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return null;
+            return [lat, lng];
+        }
+
+        function setFormError(msg) {
+            const el = document.getElementById('form-error');
+            if (!msg) { el.classList.add('hidden'); el.textContent = ''; return; }
+            el.textContent = msg;
+            el.classList.remove('hidden');
+        }
+
+        async function handleCreateRoute(e) {
+            e.preventDefault();
+            setFormError('');
+
+            const busId = document.getElementById('new-bus-id').value.trim();
+            const routeName = document.getElementById('new-route-name').value.trim();
+            const start = parseCoords(document.getElementById('new-start-coords').value);
+            const end = parseCoords(document.getElementById('new-end-coords').value);
+            const speed = parseInt(document.getElementById('new-speed').value, 10);
+
+            if (!start || !end) {
+                setFormError('Enter valid "lat, lng" coordinates for both start and end.');
+                return;
+            }
+            if (buses.some(b => b.id.toLowerCase() === busId.toLowerCase())) {
+                setFormError(`Vehicle ID "${busId}" is already in use.`);
+                return;
+            }
+
+            const btn = document.getElementById('submit-btn');
+            const label = document.getElementById('submit-btn-label');
+            label.textContent = 'Snapping to road network…';
+            btn.disabled = true;
+            btn.style.opacity = '0.7';
+
+            const newBus = {
+                id: busId,
+                route: routeName,
+                targetSpeedKmh: speed,
+                eta: '4 min',
+                occupancy: '15%',
+                capacityNum: 15,
+                nextStop: 'Terminal',
+                stops: [start, end, start],
+                waypoints: [],
+                currentSegment: 0,
+                segmentProgress: 0,
+                currentPos: start,
+                bearing: 0
+            };
+
+            await snapToRoads(newBus);
+            buses.push(newBus);
+            createBusMarker(newBus);
+
+            label.textContent = 'Publish route & deploy bus';
+            btn.disabled = false;
+            btn.style.opacity = '1';
+            document.getElementById('route-form').reset();
+            document.getElementById('new-speed').value = 30;
+            switchView('tracking');
+            selectBus(newBus);
+            showNotice(`${newBus.id} deployed on "${newBus.route}"`);
+        }
+
+        function setSimSpeed(speed) {
+            speedMultiplier = parseFloat(speed);
+        }
+
+        function triggerSOS() {
+            document.getElementById('sos-modal').classList.remove('hidden');
+            document.getElementById('sos-modal').classList.add('flex');
+        }
+        function closeSOS() {
+            document.getElementById('sos-modal').classList.add('hidden');
+            document.getElementById('sos-modal').classList.remove('flex');
+        }
+
+        // Keep drawer state sane when crossing the mobile/desktop breakpoint
+        const desktopQuery = window.matchMedia('(min-width: 768px)');
+        desktopQuery.addEventListener('change', () => {
+            document.getElementById('drawer-tracking').classList.remove('drawer-closed');
+            document.getElementById('drawer-management').classList.remove('drawer-closed');
+            isMobileDrawerOpen = true;
+            document.getElementById('drawer-toggle-icon').className = 'fa-solid fa-xmark';
+        });
+
+        switchView('tracking');
+        window.onload = initApp;
+    </script>
+</body>
+</html>
